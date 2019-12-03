@@ -3,7 +3,7 @@
 // @version     1.0
 // @author      cphxxx
 // @description Move sidebar to the right on SC torrent page.
-// @homepage    https://secret-cinema.pw/forums.php?action=viewthread&threadid=905
+// @homepage    https://secret-cinema.pw/forums.php?action=viewthread&threadid=1649
 //
 // @icon        https://secret-cinema.pw/favicon.ico
 // @match       *://*.secret-cinema.pw/torrents.php?id=*

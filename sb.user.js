@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name        sc-right-sidebar
-// @version     1.0
+// @name        sc-left-sidebar
+// @version     0.9
 // @author      cphxxx
-// @description Move sidebar to the right on SC torrent page.
+// @description Move sidebar to the left on SC torrent page.
 // @homepage    https://secret-cinema.pw/forums.php?action=viewthread&threadid=1649
 //
 // @icon        https://secret-cinema.pw/favicon.ico

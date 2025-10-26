@@ -1,0 +1,144 @@
+// ==UserScript==
+// @name        sc-letterboxd-inline-rating
+// @namespace   https://tampermonkey.net/
+// @version     1.0
+// @author      huck / boisterous-larva
+// @description Add Letterboxd link and inline rating (no button) to Secret Cinema torrent and request pages.
+// @homepage    https://secret-cinema.pw/forums.php?action=viewthread&threadid=902
+// @icon        https://letterboxd.com/favicon.ico
+// @updateURL   https://github.com/nothuck/sc-letterboxd/raw/master/sc-letterboxd.user.js
+// @downloadURL https://github.com/nothuck/sc-letterboxd/raw/master/sc-letterboxd.user.js
+// @match       *://*.secret-cinema.pw/torrents.php?id=*
+// @match       *://*.secret-cinema.pw/requests.php?action=view&id=*
+// @grant       GM_xmlhttpRequest
+// @grant       GM.xmlHttpRequest
+// @connect     letterboxd.com
+// ==/UserScript==
+
+
+(() => {
+  'use strict';
+  const log = (...a) => console.log('[LB-inline]', ...a);
+  const err = (...a) => console.error('[LB-inline]', ...a);
+
+  // --- helpers ---
+  function getImdbId() {
+    const a =
+      document.querySelector('a.tooltip[href*="imdb.com/title/tt"]') ||
+      document.querySelector('a[href*="imdb.com/title/tt"]');
+    const m = a && a.href.match(/tt\d{1,8}/);
+    return m ? m[0] : null; // "tt1234567"
+  }
+
+  function findOrCreateLbLink() {
+    const linkbox = document.querySelector('.linkbox');
+    if (!linkbox) return null;
+
+    let a = Array.from(linkbox.querySelectorAll('a.brackets'))
+      .find(el => /letterboxd\.com\/imdb\/tt/.test(el.href));
+
+    if (!a) {
+      const imdbId = getImdbId();
+      if (!imdbId) return null;
+      const lbUrl = `https://letterboxd.com/imdb/${imdbId}`;
+      a = document.createElement('a');
+      a.className = 'brackets';
+      a.href = lbUrl;
+      a.target = '_blank';
+      a.textContent = 'Letterboxd';
+      a.setAttribute('data-lb-inline', '1');
+      linkbox.appendChild(a);
+    }
+    return a;
+  }
+
+  let cachedText = '';
+  let fetched = false;
+
+  function fetchLB() {
+    if (fetched) return Promise.resolve(cachedText);
+    fetched = true;
+
+    const imdbId = getImdbId();
+    if (!imdbId) return Promise.resolve('');
+    const lbUrl = `https://letterboxd.com/imdb/${imdbId}`;
+
+    const GMXHR = (typeof GM_xmlhttpRequest === 'function')
+      ? GM_xmlhttpRequest
+      : (GM && typeof GM.xmlHttpRequest === 'function' ? GM.xmlHttpRequest : null);
+    if (!GMXHR) { err('GM XHR missing'); return Promise.resolve(''); }
+
+    return new Promise(res => {
+      GMXHR({
+        method: 'GET',
+        url: lbUrl,
+        onload: (r) => {
+          try {
+            if (r.status !== 200 || !r.responseText) return res('');
+            const doc = new DOMParser().parseFromString(r.responseText, 'text/html');
+            const scripts = doc.querySelectorAll('script[type="application/ld+json"]');
+            let ratingValue = null, ratingCount = null;
+
+            for (const s of scripts) {
+              try {
+                let txt = s.textContent.trim()
+                  .replace(/^\/\*\s*<!\[CDATA\[\s*\*\/\s*/, '')
+                  .replace(/\/\*\s*\]\]>\s*\*\/\s*$/, '');
+                const data = JSON.parse(txt);
+                const arr = Array.isArray(data) ? data : [data];
+                for (const item of arr) {
+                  const ar = item && item.aggregateRating;
+                  if (ar && ar.ratingValue) {
+                    ratingValue = ar.ratingValue;
+                    ratingCount = ar.ratingCount;
+                  }
+                }
+                if (ratingValue) break;
+              } catch {}
+            }
+
+            if (!ratingValue) return res('');
+            const star = '★';
+            const val = Number(ratingValue).toFixed(1);
+            const cnt = ratingCount ? Number(ratingCount).toLocaleString() : '';
+            cachedText = `${star} ${val}${cnt ? ` · ${cnt}` : ''}`;
+            log('Set rating:', cachedText);
+            res(cachedText);
+          } catch (e) { err('Parse error', e); res(''); }
+        },
+        onerror: (e) => { err('XHR error', e); res(''); }
+      });
+    });
+  }
+
+  function applyIntoLink() {
+    const a = findOrCreateLbLink();
+    if (!a) return;
+    if (a.dataset.lbDecorated === '1') return; // already decorated
+
+    // If we already have the text, decorate immediately; else async set
+    if (cachedText) {
+      a.textContent = `Letterboxd ${cachedText}`;
+      a.dataset.lbDecorated = '1';
+    } else {
+      fetchLB().then(txt => {
+        if (!txt) return;
+        // Link may have been re-created; find again
+        const fresh = findOrCreateLbLink();
+        if (!fresh) return;
+        fresh.textContent = `Letterboxd ${txt}`;
+        fresh.dataset.lbDecorated = '1';
+      });
+    }
+  }
+
+  // initial & observe DOM changes (Gazelle/other scripts often re-render)
+  function start() {
+    applyIntoLink();
+    const obs = new MutationObserver(() => applyIntoLink());
+    obs.observe(document.body, { childList: true, subtree: true });
+  }
+
+  if (document.readyState === 'complete' || document.readyState === 'interactive') start();
+  else window.addEventListener('DOMContentLoaded', start, { once: true });
+})();

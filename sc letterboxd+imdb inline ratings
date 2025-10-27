@@ -3,7 +3,7 @@
 // @namespace   https://tampermonkey.net/
 // @version     2.4
 // @author      huck / boisterous-larva
-// @description Put Letterboxd & IMDb ratings directly inside their bracket links; optimized to avoid MutationObserver loops in Firefox.
+// @description Put Letterboxd & IMDb ratings on SC
 // @match       *://*.secret-cinema.pw/torrents.php?id=*
 // @match       *://*.secret-cinema.pw/requests.php?action=view&id=*
 // @run-at      document-idle

@@ -1,0 +1,251 @@
+// ==UserScript==
+// @name        sc letterboxd+imdb inline ratings (FF-safe)
+// @namespace   https://tampermonkey.net/
+// @version     2.4
+// @author      huck / boisterous-larva
+// @description Put Letterboxd & IMDb ratings directly inside their bracket links; optimized to avoid MutationObserver loops in Firefox.
+// @match       *://*.secret-cinema.pw/torrents.php?id=*
+// @match       *://*.secret-cinema.pw/requests.php?action=view&id=*
+// @run-at      document-idle
+// @grant       GM_xmlhttpRequest
+// @grant       GM.xmlHttpRequest
+// @connect     letterboxd.com
+// @connect     www.imdb.com
+// @noframes
+// ==/UserScript==
+
+(() => {
+  'use strict';
+
+  // --- combined style block ---
+  const style = document.createElement('style');
+  style.textContent = `
+    /* spacing between any two bracket links */
+    .linkbox a.brackets + a.brackets {
+      margin-left: 8px;
+    }
+
+    /* Letterboxd green */
+    .linkbox a.brackets[href*="letterboxd.com"] {
+      color: #ff02eb !important;
+    }
+
+    /* IMDb yellow */
+    .linkbox a.brackets[href*="imdb.com"] {
+      color: #0014ff !important;
+    }
+  `;
+  document.head.appendChild(style);
+
+
+
+  const log = (...a) => console.log('[LB+IMDb]', ...a);
+
+  // ---------- helpers ----------
+  const gmXhr = () =>
+    (typeof GM_xmlhttpRequest === 'function')
+      ? GM_xmlhttpRequest
+      : (GM && typeof GM.xmlHttpRequest === 'function' ? GM.xmlHttpRequest : null);
+
+  const q = (sel, root=document) => root.querySelector(sel);
+
+  function getImdbId() {
+    const a = q('a.tooltip[href*="imdb.com/title/tt"]') || q('a[href*="imdb.com/title/tt"]');
+    const m = a && a.href.match(/tt\d{1,9}/);
+    return m ? m[0] : null;
+  }
+
+  function formatNum(n) {
+    const x = Number(n);
+    return Number.isFinite(x) ? x.toLocaleString() : String(n || '');
+  }
+
+  // ---------- fetchers (cached) ----------
+  let lbText = '';   // "★ 4.3 · 657,323"
+  let imdbText = ''; // "★ 8.6 (1,234,567)"
+  let lbDone = false;
+  let imdbDone = false;
+
+  function fetchLetterboxd(imdbId) {
+    if (lbDone) return Promise.resolve(lbText);
+    lbDone = true;
+    const XHR = gmXhr(); if (!XHR || !imdbId) return Promise.resolve('');
+    const url = `https://letterboxd.com/imdb/${imdbId}`;
+    return new Promise(res => {
+      XHR({
+        method: 'GET',
+        url,
+        onload: r => {
+          try {
+            if (r.status !== 200 || !r.responseText) return res('');
+            const doc = new DOMParser().parseFromString(r.responseText, 'text/html');
+            const scripts = doc.querySelectorAll('script[type="application/ld+json"]');
+            let value = null, count = null;
+            for (const s of scripts) {
+              try {
+                const data = JSON.parse(s.textContent.trim()
+                  .replace(/^\/\*\s*<!\[CDATA\[\s*\*\/\s*/, '')
+                  .replace(/\/\*\s*\]\]>\s*\*\/\s*$/, ''));
+                for (const item of (Array.isArray(data) ? data : [data])) {
+                  const ar = item && item.aggregateRating;
+                  if (ar?.ratingValue) { value = ar.ratingValue; count = ar.ratingCount; break; }
+                }
+                if (value) break;
+              } catch {}
+            }
+            if (!value) return res('');
+            lbText = `★ ${Number(value).toFixed(1)}${count ? ` · ${formatNum(count)}` : ''}`;
+            log('LB:', lbText); res(lbText);
+          } catch { res(''); }
+        },
+        onerror: () => res('')
+      });
+    });
+  }
+
+  function fetchImdb(imdbId) {
+    if (imdbDone) return Promise.resolve(imdbText);
+    imdbDone = true;
+    const XHR = gmXhr(); if (!XHR || !imdbId) return Promise.resolve('');
+    const url = `https://www.imdb.com/title/${imdbId}/`;
+    return new Promise(res => {
+      XHR({
+        method: 'GET',
+        url,
+        onload: r => {
+          try {
+            if (r.status !== 200 || !r.responseText) return res('');
+            const doc = new DOMParser().parseFromString(r.responseText, 'text/html');
+            // Prefer JSON-LD
+            const scripts = doc.querySelectorAll('script[type="application/ld+json"]');
+            let value = null, count = null;
+            for (const s of scripts) {
+              try {
+                const data = JSON.parse(s.textContent);
+                for (const item of (Array.isArray(data) ? data : [data])) {
+                  const ar = item && item.aggregateRating;
+                  if (ar?.ratingValue) { value = ar.ratingValue; count = ar.ratingCount; break; }
+                }
+                if (value) break;
+              } catch {}
+            }
+            // Fallback to hero bar
+            if (!value) {
+              const n = doc.querySelector('[data-testid="hero-rating-bar__aggregate-rating__score"] span');
+              if (n) value = n.textContent.trim();
+            }
+            if (!value) return res('');
+            imdbText = `★ ${value}${count ? ` (${formatNum(count)})` : ''}`;
+            log('IMDb:', imdbText); res(imdbText);
+          } catch { res(''); }
+        },
+        onerror: () => res('')
+      });
+    });
+  }
+
+  // ---------- rendering (minimal writes + debounce) ----------
+  function ensureLinks(linkbox, imdbId) {
+    if (!linkbox || !imdbId) return { lbA: null, imdbA: null };
+
+    // LB anchor (reuse or create)
+    const lbHref = `https://letterboxd.com/imdb/${imdbId}`;
+    let lbA = Array.from(linkbox.querySelectorAll('a.brackets'))
+      .find(el => /letterboxd\.com\/imdb\/tt/.test(el.href));
+    if (!lbA) {
+      lbA = document.createElement('a');
+      lbA.className = 'brackets';
+      lbA.href = lbHref;
+      lbA.target = '_blank';
+      lbA.dataset.lbInline = '1';
+      lbA.textContent = 'Letterboxd';
+      linkbox.appendChild(lbA);
+    }
+
+    // IMDb anchor (reuse or create a dedicated one)
+    const imdbHref = `https://www.imdb.com/title/${imdbId}/`;
+    let imdbA = Array.from(linkbox.querySelectorAll('a.brackets'))
+      .find(el => /imdb\.com\/title\/tt/.test(el.href));
+    if (!imdbA) {
+      imdbA = document.createElement('a');
+      imdbA.className = 'brackets';
+      imdbA.href = imdbHref;
+      imdbA.target = '_blank';
+      imdbA.dataset.imdbInline = '1';
+      imdbA.textContent = 'IMDb';
+      linkbox.appendChild(imdbA);
+    }
+
+    return { lbA, imdbA };
+  }
+
+  function updateTextIfChanged(a, desired) {
+    if (!a || !desired) return;
+    if (a.textContent === desired || a.textContent === desired.trim()) return;
+    a.textContent = desired;
+  }
+
+  let queued = false;
+  function scheduleUpdate(fn) {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(() => { queued = false; fn(); });
+  }
+
+function apply(linkbox, imdbId) {
+  const { lbA, imdbA } = ensureLinks(linkbox, imdbId);
+  if (lbText && lbA) updateTextIfChanged(lbA, `Letterboxd ${lbText}`);
+  if (imdbText && imdbA) updateTextIfChanged(imdbA, ` IMDb ${imdbText}`);
+
+
+    // kick off fetches once; update when done
+    if (!lbText) fetchLetterboxd(imdbId).then(t => {
+      if (t && lbA) scheduleUpdate(() => updateTextIfChanged(lbA, `Letterboxd ${t}`));
+    });
+    if (!imdbText) fetchImdb(imdbId).then(t => {
+      if (t && imdbA) scheduleUpdate(() => updateTextIfChanged(imdbA, `IMDb ${t}`));
+    });
+  }
+
+  // ---------- find & observe ONLY the linkbox ----------
+  function waitForLinkbox() {
+    return new Promise(resolve => {
+      const lb = q('.linkbox');
+      if (lb) return resolve(lb);
+      const mo = new MutationObserver(() => {
+        const el = q('.linkbox');
+        if (el) { mo.disconnect(); resolve(el); }
+      });
+      mo.observe(document.documentElement, { childList: true, subtree: true });
+    });
+  }
+
+  async function start() {
+    const imdbId = getImdbId();
+    if (!imdbId) return;
+    let linkbox = await waitForLinkbox();
+
+    // initial render
+    apply(linkbox, imdbId);
+
+    // Observe changes under linkbox ONLY (low-noise), and re-apply debounced
+    let mo = new MutationObserver(() => scheduleUpdate(() => apply(linkbox, imdbId)));
+    mo.observe(linkbox, { childList: true, subtree: true });
+
+    // Also watch for linkbox being replaced entirely; re-hook observer then
+    const rootMo = new MutationObserver(() => {
+      const current = q('.linkbox');
+      if (current && current !== linkbox) {
+        mo.disconnect();
+        linkbox = current;
+        apply(linkbox, imdbId);
+        mo = new MutationObserver(() => scheduleUpdate(() => apply(linkbox, imdbId)));
+        mo.observe(linkbox, { childList: true, subtree: true });
+      }
+    });
+    rootMo.observe(document.body, { childList: true, subtree: true });
+  }
+
+  if (document.readyState === 'complete' || document.readyState === 'interactive') start();
+  else window.addEventListener('DOMContentLoaded', start, { once: true });
+})();
